@@ -92,10 +92,12 @@ INDICATE_START = 0x01
 INDICATE_DATA = 0x02
 INDICATE_END = 0x03
 
-serial_port = cps.data_comports()[0]
+avail_ports = cps.data_comports()
 
-if not serial:
+if not avail_ports:
     raise Exception("No CircuitPython boards found")
+
+serial_port = avail_ports[0]
 
 ser = serial.Serial(serial_port.device)
 
