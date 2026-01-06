@@ -5,11 +5,12 @@ import displayio
 import struct
 from i2cdisplaybus import I2CDisplayBus
 import adafruit_displayio_ssd1306
-import zlib
+import binascii
+import usb_cdc
 
 from pysquared.hardware.radio.packetizer.packet_manager import PacketManager
 from lib.pysquared.hardware.radio.manager.rfm9x import RFM9xManager
-from lib.pysquared.logger import Logger
+from lib.pysquared.logger import Logger, LogLevel
 from lib.pysquared.config.config import Config
 from lib.pysquared.hardware.digitalio import initialize_pin
 from lib.pysquared.nvm.counter import Counter
@@ -34,6 +35,9 @@ INDICATE_START = 0x01
 INDICATE_DATA = 0x02
 INDICATE_END = 0x03
 
+# usb_cdc terminator
+USB_TERMINATOR = b"\r\n"
+
 display = adafruit_displayio_ssd1306.SSD1306(display_bus, width=WIDTH, height=HEIGHT)
 
 # RADIO_FREQ_MHZ = 915.0
@@ -53,7 +57,9 @@ spi = busio.SPI(board.GP2, MOSI=board.GP3, MISO=board.GP4)
 # if rfm9x.spreading_factor > 9:
 #     rfm9x.preamble_length = 8
 
-logger: Logger = Logger()
+
+error_count: Counter = Counter(index=Register.error_count)
+logger: Logger = Logger(error_counter=error_count, log_level=LogLevel.DEBUG)
 config: Config = Config("config.json")
 
 radio = RFM9xManager(
@@ -72,6 +78,8 @@ packet_manager = PacketManager(
     0.2,
 )
 
+serial = usb_cdc.data
+
 
 def receive_and_verify_image(packet_manager: PacketManager) -> bool:
     start_packet = struct.unpack("<BII", packet_manager.listen(timeout=1.0))
@@ -80,9 +88,18 @@ def receive_and_verify_image(packet_manager: PacketManager) -> bool:
         total_chunks = start_packet[1]
         file_crc = start_packet[2]
         received_total_crc = 0
+        print(
+            f"start_packet was INDICATE_START with {total_chunks} chunks and crc of {file_crc}"
+        )
+
+        serial.write(start_packet + USB_TERMINATOR)
 
         for i in range(total_chunks):
-            packed_chunk = packet_manager.listen(timeout=1.0)
+            print("listening for next chunk")
+            packed_chunk = packet_manager.listen(timeout=30.0)
+            print(f"got chunk with size {len(packed_chunk)}")
+
+            serial.write(packed_chunk + USB_TERMINATOR)
 
             HEADER_FMT = "<BII"
             HEADER_SIZE = struct.calcsize(HEADER_FMT)
@@ -92,7 +109,7 @@ def receive_and_verify_image(packet_manager: PacketManager) -> bool:
             )
 
             chunk = packed_chunk[HEADER_SIZE:]
-            received_total_crc = zlib.crc32(chunk, received_total_crc)
+            received_total_crc = binascii.crc32(chunk, received_total_crc)
 
             if indicator != INDICATE_DATA:
                 print(
@@ -101,7 +118,7 @@ def receive_and_verify_image(packet_manager: PacketManager) -> bool:
             elif indicator == INDICATE_END:
                 print("data packet type indicator byte is end")
 
-            if zlib.crc32(chunk) != crc32:
+            if binascii.crc32(chunk) != crc32:
                 print("chunk crc does not match")
 
             if i != chunk_index:
@@ -110,6 +127,8 @@ def receive_and_verify_image(packet_manager: PacketManager) -> bool:
         end_packet = struct.unpack("<B", packet_manager.listen(timeout=1.0))
         if end_packet[0] != INDICATE_END:
             print("last data packet was not end packet")
+        else:
+            serial.write(end_packet + USB_TERMINATOR)
 
         return file_crc == received_total_crc
     else:
@@ -144,7 +163,7 @@ while True:
             if packet_text == "fmstl":
                 print("got an image packet indicator")
                 if receive_and_verify_image(packet_manager):
-                    print("succesfully received and verified an image!")
+                    print("succesfully received and verified an file!")
                     received_images += 1
                 else:
                     print("failed to receive and or verify image.")
